@@ -42,14 +42,14 @@ typedef struct thread_pool_
 	pthread_mutex_t       tasks_mtx;			//任务数据的互斥
 	pthread_cond_t        tasks_cond;			//任务数据的条件变量
 
-	thread_pool_task_t	  waiting_tasks;			//等待执行的任务
-	thread_pool_task_t    waiting_tasks_tail;			//
+	thread_pool_task_t	  waiting_tasks;	    //等待执行的任务
+	thread_pool_task_t    waiting_tasks_tail;	//等待执行任务的尾部，用于快速插入
 
-	thread_pool_task_t    idle_tasks;
-	thread_pool_task_t    idle_tasks_tail;
+	thread_pool_task_t    idle_tasks;			//空闲任务列表
+	thread_pool_task_t    idle_tasks_tail;		//空闲任务尾部，用于快速插入
 
-	unsigned short          waiting_tasks_count;
-	unsigned short          idle_tasks_count;
+	unsigned short        waiting_tasks_count;  //等待执行任务数量
+	unsigned short        idle_tasks_count;		//空闲任务数量
 };
 
 typedef struct thread_param_
@@ -60,6 +60,7 @@ typedef struct thread_param_
 
 static inline void* _thread_pool_proc(void * args);
 
+//停止一个县城
 static inline void     _thread_pool_stop_thread(thread_t thread)
 {
 	if (!thread)
@@ -69,6 +70,7 @@ static inline void     _thread_pool_stop_thread(thread_t thread)
 	pthread_join(thread->handle, NULL);
 }
 
+//清理线程
 static inline void   _thread_pool_free_thread(thread_t thread)
 {
 	while (thread)
@@ -80,6 +82,7 @@ static inline void   _thread_pool_free_thread(thread_t thread)
 	}
 }
 
+//创建线程
 static inline thread_t _thread_pool_create_thread(thread_pool_t pool, thread_proc_t thread_proc)
 {
 	thread_param_t param = NULL;
@@ -109,6 +112,7 @@ clean:
 	return NULL;
 }
 
+//初始化线程链表
 static inline bool _thread_pool_init_threads(thread_pool_t pool, unsigned short count)
 {
 	pthread_mutex_lock(&pool->thread_mtx);
@@ -138,12 +142,14 @@ unlock:
 	return success;
 }
 
+//是否需要对线程链表进行扩容
 static inline  short  _thread_pool_need_stretch(thread_pool_t pool)
 {
 	//任务数量大于 空闲线程的数量
 	return  pool->waiting_tasks_count - pool->idle_thread_count;
 }
 
+//对线程链表进行扩容
 static inline void  _thread_pool_stretch(thread_pool_t pool)
 {
 	short need_stretch = _thread_pool_need_stretch(pool);
@@ -151,6 +157,7 @@ static inline void  _thread_pool_stretch(thread_pool_t pool)
 		_thread_pool_init_threads(pool, need_stretch);
 }
 
+//插入空闲任务
 static inline void  _thread_pool_add_idle_task(thread_pool_t pool, thread_pool_task_t task)
 {
 	task->next = NULL;
@@ -165,6 +172,7 @@ static inline void  _thread_pool_add_idle_task(thread_pool_t pool, thread_pool_t
 	pthread_mutex_unlock(&pool->tasks_mtx);
 }
 
+//获取等待执行的任务
 static inline bool  _thread_pool_get_task(thread_pool_t pool, thread_t thread, thread_pool_task_t * task)
 {
 	bool success = false;
@@ -196,6 +204,7 @@ unlock:
 	return success;
 }
 
+//线程函数
 static inline void * _thread_pool_proc(void * args)
 {
 	thread_t thread = ((thread_param_t)args)->thread;
@@ -216,8 +225,7 @@ static inline void * _thread_pool_proc(void * args)
 	free(args);
 }
 
-
-
+//创建线程池 最少线程数量，最大线程数量
 thread_pool_t thread_pool_create(unsigned short min_count, unsigned short max_count)
 {
 	if (min_count <= 0 || max_count > 16)
@@ -243,6 +251,7 @@ clean:
 	return NULL;
 }
 
+//添加待执行任务
 bool thread_pool_make_task(thread_pool_t pool, void * param, task_handler_t handler)
 {
 	if (!pool)
@@ -264,7 +273,6 @@ bool thread_pool_make_task(thread_pool_t pool, void * param, task_handler_t hand
 		pool->idle_tasks = task->next;
 		pool->idle_tasks_count--;
 		memset(task, 0, sizeof(struct thread_pool_task_));
-		printf("get idle task,idle task count:%d  cur thread count:%d\n", pool->idle_tasks_count,pool->current_thread_count);
 	}
 
 	task->param = param;
@@ -283,7 +291,7 @@ unlock:
 	return success;
 }
  
-
+//清理任务列表
 static inline void _thread_pool_free_task(thread_pool_t pool)
 {
 
@@ -298,6 +306,7 @@ static inline void _thread_pool_free_task(thread_pool_t pool)
 	pool->idle_tasks_count = 0;
 }
 
+//线程池销毁
 void  thread_pool_destory(thread_pool_t pool)
 {
 	if (!pool)
@@ -313,6 +322,7 @@ void  thread_pool_destory(thread_pool_t pool)
 	pthread_cond_destroy(&pool->tasks_cond);
 }
 
+//收缩线程数量和空闲任务链表
 void  thread_pool_shrink(thread_pool_t pool)
 {
 	thread_t thread = NULL;
@@ -358,6 +368,7 @@ unlock:
 	}
 }
 
+//打印线程池状态报告
 char * thread_pool_print_report(thread_pool_t pool)
 {
 	return NULL;
