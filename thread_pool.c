@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <pthread.h>
 #include "thread_pool.h"
 
@@ -30,20 +31,25 @@ typedef struct thread_
 
 typedef struct thread_pool_
 {
-	thread_t	          threads;
-	unsigned short        max_thread_count;
-	unsigned short        min_thread_count;
-	unsigned short		  current_thread_count;
-	unsigned short        idle_thread_count;
+	thread_t	          threads;				//çº¿ç¨‹
+	unsigned short        max_thread_count;		//æœ€å¤§çº¿ç¨‹æ•°é‡
+	unsigned short        min_thread_count;		//æœ€ä½çº¿ç¨‹æ•°é‡
+	unsigned short		  current_thread_count;	//å½“å‰çº¿ç¨‹æ•°é‡
+	unsigned short        idle_thread_count;    //ç©ºé—²çº¿ç¨‹æ•°é‡
 
-	pthread_mutex_t       thread_mtx;
+	pthread_mutex_t       thread_mtx;			//çº¿ç¨‹æ•°æ®çš„äº’æ–¥
 
-	pthread_mutex_t       tasks_mtx;
-	pthread_cond_t        tasks_cond;
+	pthread_mutex_t       tasks_mtx;			//ä»»åŠ¡æ•°æ®çš„äº’æ–¥
+	pthread_cond_t        tasks_cond;			//ä»»åŠ¡æ•°æ®çš„æ¡ä»¶å˜é‡
 
-	thread_pool_task_t	  tasks_root;
-	thread_pool_task_t    tasks_tail;
-	unsigned int          tasks_counts;
+	thread_pool_task_t	  waiting_tasks;			//ç­‰å¾…æ‰§è¡Œçš„ä»»åŠ¡
+	thread_pool_task_t    waiting_tasks_tail;			//
+
+	thread_pool_task_t    idle_tasks;
+	thread_pool_task_t    idle_tasks_tail;
+
+	unsigned short          waiting_tasks_count;
+	unsigned short          idle_tasks_count;
 };
 
 typedef struct thread_param_
@@ -52,96 +58,7 @@ typedef struct thread_param_
 	thread_t      thread;
 }*thread_param_t;
 
-
-static inline void* _thread_pool_proc(void * args)
-{
-	thread_t thread = ((thread_param_t)args)->thread;
-	thread_pool_t pool = ((thread_param_t)args)->pool;
-
-	while (thread->run)
-	{
-		thread_pool_task_t task = NULL;
-		if (!_thread_pool_get_task(pool, thread, &task))
-			continue;
-
-		(*task->handler)(task->param);
-	}
-
-	free(args);
-}
-
-static inline  short  _thread_pool_need_stretch(thread_pool_t pool)
-{
-	//ÈÎÎñÊıÁ¿´óÓÚ ¿ÕÏĞÏß³ÌµÄÊıÁ¿
-	return  pool->tasks_counts - pool->idle_thread_count;
-}
-
-static inline bool _thread_pool_init_threads(thread_pool_t pool, unsigned short count)
-{
-	pthread_mutex_lock(&pool->thread_mtx);
-	int i = 0;
-	bool success = false;
-	int final_count = (pool->current_thread_count + count) > pool->max_thread_count
-		? (pool->max_thread_count - pool->current_thread_count) : count;
-
-	for (; i < final_count; i++)
-	{
-		thread_t thread = _thread_pool_create_thread(pool,_thread_pool_proc);
-		if (!thread)
-			goto unlock;
-
-		if (!pool->threads)
-			pool->threads = thread;
-		else
-			pool->threads->prev->next = thread;
-
-		pool->threads->prev = thread;
-		pool->current_thread_count++;
-	}
-
-	success = true;
-unlock:
-	pthread_mutex_unlock(&pool->thread_mtx);
-	return success;
-}
-
-static inline void  _thread_pool_stretch(thread_pool_t pool)
-{
-	short need_stretch = _thread_pool_need_stretch(pool);
-	if (need_stretch > 0)
-		_thread_pool_init_threads(pool, need_stretch);
-}
-
-static inline bool  _thread_pool_get_task(thread_pool_t pool, thread_t thread, thread_pool_task_t * task)
-{
-	bool success = false;
-	pthread_mutex_lock(pool->tasks_mtx);
-	if (pool->tasks_counts <= 0)
-	{
-		pool->idle_thread_count++;
-		thread->status = thread_status_idle;
-		pthread_cond_wait(&pool->tasks_cond, &pool->tasks_mtx);
-		goto unlock;
-	}
-
-	*task = pool->tasks_root;
-	pool->tasks_root = (*task)->next;
-	if (!pool->tasks_root)
-		pool->tasks_tail = NULL;
-
-
-	pool->tasks_counts--;
-	pool->idle_thread_count--;
-	thread->status = thread_status_busy;
-	success = true;
-
-unlock:
-	pthread_mutex_unlock(&pool->tasks_mtx);
-	if (success)
-		_thread_pool_stretch(pool);
-
-	return success;
-}
+static inline void* _thread_pool_proc(void * args);
 
 static inline void     _thread_pool_stop_thread(thread_t thread)
 {
@@ -154,8 +71,13 @@ static inline void     _thread_pool_stop_thread(thread_t thread)
 
 static inline void   _thread_pool_free_thread(thread_t thread)
 {
-	_thread_pool_stop_thread(thread);
-	free(thread);
+	while (thread)
+	{
+		thread_t cur = thread;
+		thread = cur->next;
+		_thread_pool_stop_thread(cur);
+		free(cur);
+	}
 }
 
 static inline thread_t _thread_pool_create_thread(thread_pool_t pool, thread_proc_t thread_proc)
@@ -163,7 +85,7 @@ static inline thread_t _thread_pool_create_thread(thread_pool_t pool, thread_pro
 	thread_param_t param = NULL;
 	thread_t thread = (thread_t)calloc(1, sizeof(struct thread_));
 	if (!thread)
-		return false;
+		return NULL;
 
 	param = (thread_param_t)calloc(1, sizeof(struct thread_param_));
 	if (!param)
@@ -187,6 +109,115 @@ clean:
 	return NULL;
 }
 
+static inline bool _thread_pool_init_threads(thread_pool_t pool, unsigned short count)
+{
+	pthread_mutex_lock(&pool->thread_mtx);
+	int i = 0;
+	bool success = false;
+	int final_count = (pool->current_thread_count + count) > pool->max_thread_count
+		? (pool->max_thread_count - pool->current_thread_count) : count;
+
+	for (; i < final_count; i++)
+	{
+		thread_t thread = _thread_pool_create_thread(pool, _thread_pool_proc);
+		if (!thread)
+			goto unlock;
+
+		if (!pool->threads)
+			pool->threads = thread;
+		else
+			pool->threads->prev->next = thread;
+
+		pool->threads->prev = thread;
+		pool->current_thread_count++;
+	}
+
+	success = true;
+unlock:
+	pthread_mutex_unlock(&pool->thread_mtx);
+	return success;
+}
+
+static inline  short  _thread_pool_need_stretch(thread_pool_t pool)
+{
+	//ä»»åŠ¡æ•°é‡å¤§äº ç©ºé—²çº¿ç¨‹çš„æ•°é‡
+	return  pool->waiting_tasks_count - pool->idle_thread_count;
+}
+
+static inline void  _thread_pool_stretch(thread_pool_t pool)
+{
+	short need_stretch = _thread_pool_need_stretch(pool);
+	if (need_stretch > 0)
+		_thread_pool_init_threads(pool, need_stretch);
+}
+
+static inline void  _thread_pool_add_idle_task(thread_pool_t pool, thread_pool_task_t task)
+{
+	task->next = NULL;
+	pthread_mutex_lock(&pool->tasks_mtx);
+	if (!pool->idle_tasks)
+		pool->idle_tasks = task;
+	else
+		pool->idle_tasks_tail->next = task;
+
+	pool->idle_tasks_count++;
+	pool->idle_tasks_tail = task;
+	pthread_mutex_unlock(&pool->tasks_mtx);
+}
+
+static inline bool  _thread_pool_get_task(thread_pool_t pool, thread_t thread, thread_pool_task_t * task)
+{
+	bool success = false;
+	pthread_mutex_lock(&pool->tasks_mtx);
+	if (pool->waiting_tasks_count <= 0)
+	{
+		pool->idle_thread_count++;
+		thread->status = thread_status_idle;
+		pthread_cond_wait(&pool->tasks_cond, &pool->tasks_mtx);
+		goto unlock;
+	}
+
+	*task = pool->waiting_tasks;
+	pool->waiting_tasks = (*task)->next;
+	if (!pool->waiting_tasks)
+		pool->waiting_tasks_tail = NULL;
+
+
+	pool->waiting_tasks_count--;
+	pool->idle_thread_count--;
+	thread->status = thread_status_busy;
+	success = true;
+
+unlock:
+	pthread_mutex_unlock(&pool->tasks_mtx);
+	if (success)
+		_thread_pool_stretch(pool);
+
+	return success;
+}
+
+static inline void * _thread_pool_proc(void * args)
+{
+	thread_t thread = ((thread_param_t)args)->thread;
+	thread_pool_t pool = ((thread_param_t)args)->pool;
+
+	while (thread->run)
+	{
+		thread_pool_task_t task = NULL;
+		if (!_thread_pool_get_task(pool, thread, &task))
+			continue;
+
+		(*task->handler)(task->param);
+
+		//å°†task æ’å…¥åˆ° ç©ºé—²åˆ—è¡¨
+		_thread_pool_add_idle_task(pool, task);
+	}
+
+	free(args);
+}
+
+
+
 thread_pool_t thread_pool_create(unsigned short min_count, unsigned short max_count)
 {
 	if (min_count <= 0 || max_count > 16)
@@ -203,6 +234,10 @@ thread_pool_t thread_pool_create(unsigned short min_count, unsigned short max_co
 	pthread_mutex_init(&pool->tasks_mtx, NULL);
 	pthread_cond_init(&pool->tasks_cond, NULL);
 
+	if (!_thread_pool_init_threads(pool, min_count))
+		goto clean;
+
+	return pool;
 clean:
 	thread_pool_destory(pool);
 	return NULL;
@@ -213,26 +248,54 @@ bool thread_pool_make_task(thread_pool_t pool, void * param, task_handler_t hand
 	if (!pool)
 		return false;
 
-	thread_pool_task_t task = (thread_pool_task_t)calloc(1, sizeof(struct thread_pool_task_));
-	if (!task)
-		return NULL;
+	bool success = false;
+	pthread_mutex_lock(&pool->tasks_mtx);
+	thread_pool_task_t task = NULL;
+	if (pool->idle_tasks_count == 0)
+	{
+		task = (thread_pool_task_t)calloc(1, sizeof(struct thread_pool_task_));
+		if (!task)
+			goto unlock;
+	}
+	else
+	{
+		
+		task = pool->idle_tasks;
+		pool->idle_tasks = task->next;
+		pool->idle_tasks_count--;
+		memset(task, 0, sizeof(struct thread_pool_task_));
+		printf("get idle task,idle task count:%d  cur thread count:%d\n", pool->idle_tasks_count,pool->current_thread_count);
+	}
 
 	task->param = param;
 	task->handler = handler;
-	
-	pthread_mutex_lock(&pool->tasks_mtx);
 
-	if (!pool->tasks_root)
-		pool->tasks_root = task;
+	if (!pool->waiting_tasks)
+		pool->waiting_tasks = task;
 	else
-		pool->tasks_tail->next = task;
-	
-	pool->tasks_counts++;
-	pool->tasks_tail = task;
+		pool->waiting_tasks_tail->next = task;
 
+	pool->waiting_tasks_count++;
+	pool->waiting_tasks_tail = task;
 	pthread_cond_signal(&pool->tasks_cond);
+unlock:
 	pthread_mutex_unlock(&pool->tasks_mtx);
-	return true;
+	return success;
+}
+ 
+
+static inline void _thread_pool_free_task(thread_pool_t pool)
+{
+
+
+	pool->waiting_tasks = NULL;
+	pool->waiting_tasks_tail = NULL;
+
+	pool->idle_tasks = NULL;
+	pool->idle_tasks_tail = NULL;
+
+	pool->waiting_tasks_count = 0;
+	pool->idle_tasks_count = 0;
 }
 
 void  thread_pool_destory(thread_pool_t pool)
@@ -240,9 +303,14 @@ void  thread_pool_destory(thread_pool_t pool)
 	if (!pool)
 		return;
 
-	//¹Ø±ÕËùÓĞÏß³Ì
-	//ÊÍ·ÅËùÓĞÏß³Ì¾ä±ú
-	//ÊÍ·ÅÈÎÎñÁĞ±í
+	//_thread_pool_free_thread(pool->threads);
+	//pool->threads = NULL;
+	//é‡Šæ”¾ä»»åŠ¡åˆ—è¡¨
+	_thread_pool_free_task(pool);
+
+	pthread_mutex_destroy(&pool->thread_mtx);
+	pthread_mutex_destroy(&pool->tasks_mtx);
+	pthread_cond_destroy(&pool->tasks_cond);
 }
 
 void  thread_pool_shrink(thread_pool_t pool)
@@ -276,10 +344,9 @@ void  thread_pool_shrink(thread_pool_t pool)
 			idle_thread_count++;
 		}
 	}
-	//½«±¸pthread_cond_wait ×èÈûµÄËùÓĞ¿ÕÏĞÏß³Ì»½ĞÑ
+	//å°†å¤‡pthread_cond_wait é˜»å¡çš„æ‰€æœ‰ç©ºé—²çº¿ç¨‹å”¤é†’
 	pthread_cond_broadcast(&pool->tasks_cond);
 unlock:
-	
 	pthread_mutex_unlock(&pool->thread_mtx);
 	if (idle_threads)
 	{
@@ -290,7 +357,6 @@ unlock:
 		free(idle_threads);
 	}
 }
-
 
 char * thread_pool_print_report(thread_pool_t pool)
 {
