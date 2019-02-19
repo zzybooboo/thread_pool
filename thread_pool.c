@@ -68,18 +68,22 @@ static inline void     _thread_pool_stop_thread(thread_t thread)
 
 	thread->run = false;
 	pthread_join(thread->handle, NULL);
+	free(thread);
 }
 
 //清理线程
-static inline void   _thread_pool_free_thread(thread_t thread)
+static inline void   _thread_pool_free_thread(thread_pool_t pool)
 {
+	thread_t thread = pool->threads;
 	while (thread)
 	{
 		thread_t cur = thread;
 		thread = cur->next;
 		_thread_pool_stop_thread(cur);
-		free(cur);
 	}
+	pool->threads = NULL;
+	pool->idle_thread_count = 0;
+	pool->current_thread_count = 0;
 }
 
 //创建线程
@@ -108,7 +112,7 @@ clean:
 	if (param)
 		free(param);
 
-	_thread_pool_free_thread(thread);
+	_thread_pool_stop_thread(thread);
 	return NULL;
 }
 
@@ -291,19 +295,42 @@ unlock:
 	return success;
 }
  
-//清理任务列表
-static inline void _thread_pool_free_task(thread_pool_t pool)
+//清理等待任务列表
+static inline void _thread_pool_free_waiting_task(thread_pool_t pool)
 {
-
+	pthread_mutex_lock(&pool->tasks_mtx);
+	thread_pool_task_t task = pool->waiting_tasks;
+	while (task)
+	{
+		thread_pool_task_t cur = task;
+		free(cur);
+		task = cur->next;
+	}
 
 	pool->waiting_tasks = NULL;
 	pool->waiting_tasks_tail = NULL;
+	pool->waiting_tasks_count = 0;
+	pthread_mutex_unlock(&pool->tasks_mtx);
+
+}
+
+
+static inline void _thread_pool_free_idle_task(thread_pool_t pool)
+{
+	pthread_mutex_lock(&pool->tasks_mtx);
+	thread_pool_task_t task = pool->idle_tasks;
+	while (task)
+	{
+		thread_pool_task_t cur = task;
+		free(cur);
+		task = cur->next;
+	}
 
 	pool->idle_tasks = NULL;
 	pool->idle_tasks_tail = NULL;
-
-	pool->waiting_tasks_count = 0;
 	pool->idle_tasks_count = 0;
+	pthread_mutex_unlock(&pool->tasks_mtx);
+	
 }
 
 //线程池销毁
@@ -312,14 +339,15 @@ void  thread_pool_destory(thread_pool_t pool)
 	if (!pool)
 		return;
 
-	//_thread_pool_free_thread(pool->threads);
-	//pool->threads = NULL;
+	_thread_pool_free_thread(pool);
 	//释放任务列表
-	_thread_pool_free_task(pool);
+	_thread_pool_free_idle_task(pool);
+	_thread_pool_free_waiting_task(pool);
 
 	pthread_mutex_destroy(&pool->thread_mtx);
 	pthread_mutex_destroy(&pool->tasks_mtx);
 	pthread_cond_destroy(&pool->tasks_cond);
+	free(pool);
 }
 
 //收缩线程数量和空闲任务链表
@@ -362,7 +390,7 @@ unlock:
 	{
 		int i = 0;
 		for (; i < idle_thread_count; i++)
-			_thread_pool_free_thread(idle_threads[i]);
+			_thread_pool_stop_thread(idle_threads[i]);
 
 		free(idle_threads);
 	}
