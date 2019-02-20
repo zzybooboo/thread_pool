@@ -32,23 +32,17 @@ typedef struct thread_
 
 typedef struct thread_pool_
 {
-	struct list_head	  threads;				//线程
-	unsigned short        max_thread_count;		//最大线程数量
-	unsigned short        min_thread_count;		//最低线程数量
-	unsigned short		  current_thread_count;	//当前线程数量
-	unsigned short        idle_thread_count;    //空闲线程数量
+	struct list_head		 threads;				//线程
+	pthread_mutex_t			 thread_mtx;			//线程数据的互斥
 
-	pthread_mutex_t       thread_mtx;			//线程数据的互斥
+	pthread_mutex_t			 tasks_mtx;			    //任务数据的互斥
+	pthread_cond_t			 tasks_cond;			//任务数据的条件变量
 
-	pthread_mutex_t       tasks_mtx;			//任务数据的互斥
-	pthread_cond_t        tasks_cond;			//任务数据的条件变量
+	struct list_head 	     waiting_tasks;	        //等待执行的任务
+	struct list_head	     idle_tasks;			//空闲任务列表
 
-	struct list_head 	  waiting_tasks;	    //等待执行的任务
-	struct list_head	  idle_tasks;			//空闲任务列表
-
-
-	size_t                waiting_tasks_count;  //等待执行任务数量
-	size_t                idle_tasks_count;		//空闲任务数量
+	struct thread_pool_info_ info;				//线程池信息
+	
 };
 
 typedef struct thread_param_
@@ -94,8 +88,8 @@ static inline void   _thread_pool_free_thread(thread_pool_t pool)
 		free(thread);
 	}
 
-	pool->idle_thread_count = 0;
-	pool->current_thread_count = 0;
+	pool->info.idle_thread_count = 0;
+	pool->info.current_thread_count = 0;
 	pthread_mutex_unlock(&pool->thread_mtx);
 }
 
@@ -125,7 +119,12 @@ clean:
 	if (param)
 		free(param);
 
-	_thread_pool_stop_thread(thread);
+	if (thread)
+	{
+		_thread_pool_stop_thread(thread);
+		free(thread);
+	}
+		
 	return NULL;
 }
 
@@ -135,8 +134,8 @@ static inline bool _thread_pool_init_threads(thread_pool_t pool, unsigned short 
 	pthread_mutex_lock(&pool->thread_mtx);
 	int i = 0;
 	bool success = false;
-	int final_count = (pool->current_thread_count + count) > pool->max_thread_count
-		? (pool->max_thread_count - pool->current_thread_count) : count;
+	int final_count = (pool->info.current_thread_count + count) > pool->info.max_thread_count
+		? (pool->info.max_thread_count - pool->info.current_thread_count) : count;
 
 	for (; i < final_count; i++)
 	{
@@ -144,9 +143,8 @@ static inline bool _thread_pool_init_threads(thread_pool_t pool, unsigned short 
 		if (!thread)
 			goto unlock;
 
-		printf("create thread ........\n");
 		list_add(&thread->node, &pool->threads);
-		pool->current_thread_count++;
+		pool->info.current_thread_count++;
 	}
 
 	success = true;
@@ -159,7 +157,7 @@ unlock:
 static inline  short  _thread_pool_need_stretch(thread_pool_t pool)
 {
 	//任务数量大于 空闲线程的数量
-	return  pool->waiting_tasks_count - pool->idle_thread_count;
+	return  pool->info.waiting_tasks_count - pool->info.idle_thread_count;
 }
 
 //对线程链表进行扩容
@@ -177,7 +175,7 @@ static inline void  _thread_pool_add_idle_task(thread_pool_t pool, thread_pool_t
 	pthread_mutex_lock(&pool->tasks_mtx);
 
 	list_add(&task->node, &pool->idle_tasks);
-	pool->idle_tasks_count++;
+	pool->info.idle_tasks_count++;
 
 	pthread_mutex_unlock(&pool->tasks_mtx);
 }
@@ -190,20 +188,20 @@ static inline bool  _thread_pool_get_task(thread_pool_t pool, thread_t thread, t
 	//如果等待执行任务列表为空
 	if (list_empty(&pool->waiting_tasks))
 	{
-		pool->idle_thread_count++;
+		pool->info.idle_thread_count++;
 		thread->status = thread_status_idle;
 		pthread_cond_wait(&pool->tasks_cond, &pool->tasks_mtx);
-		pool->idle_thread_count--;
-		goto unlock;
+		pool->info.idle_thread_count--;
 	}
 
+	if (!thread->run)
+		goto unlock;
 
 	*task = list_first_entry(&pool->waiting_tasks, struct thread_pool_task_, node);
 	list_del(&(*task)->node);
-	pool->waiting_tasks_count--;
+	pool->info.waiting_tasks_count--;
 	thread->status = thread_status_busy;
 
-	pool->exce_total++;
 	success = true;
 unlock:
 	pthread_mutex_unlock(&pool->tasks_mtx);
@@ -247,8 +245,8 @@ thread_pool_t thread_pool_create(unsigned short min_thread_count, unsigned short
 	INIT_LIST_HEAD(&pool->idle_tasks);
 	INIT_LIST_HEAD(&pool->waiting_tasks);
 	
-	pool->max_thread_count = max_thread_count;
-	pool->min_thread_count = min_thread_count;
+	pool->info.max_thread_count = max_thread_count;
+	pool->info.min_thread_count = min_thread_count;
 
 	pthread_mutex_init(&pool->thread_mtx,NULL);
 	pthread_mutex_init(&pool->tasks_mtx, NULL);
@@ -279,14 +277,13 @@ bool thread_pool_make_task(thread_pool_t pool, void * param, task_handler_t hand
 		if (!task)
 			goto unlock;
 
-		pool->task_total++;
 	}
 	else
 	{
 		//从空闲任务列表取出头部
 		task = list_first_entry(&pool->idle_tasks, struct thread_pool_task_, node);
 		list_del(&task->node);
-		pool->idle_tasks_count--;
+		pool->info.idle_tasks_count--;
 	}
 
 	task->param = param;
@@ -294,7 +291,7 @@ bool thread_pool_make_task(thread_pool_t pool, void * param, task_handler_t hand
 	
 	//插入到待执行列表
 	list_add(&task->node, &pool->waiting_tasks);
-	pool->waiting_tasks_count++;
+	pool->info.waiting_tasks_count++;
 	pthread_cond_signal(&pool->tasks_cond);
 unlock:
 	pthread_mutex_unlock(&pool->tasks_mtx);
@@ -311,7 +308,7 @@ static inline void _thread_pool_free_waiting_task(thread_pool_t pool)
 		thread_pool_task_t task = list_first_entry(&pool->waiting_tasks, struct thread_pool_task_, node);
 		list_del(&task->node);
 		free(task);
-		pool->waiting_tasks_count--;
+		pool->info.waiting_tasks_count--;
 	}
 	pthread_mutex_unlock(&pool->tasks_mtx);
 }
@@ -325,7 +322,7 @@ static inline void _thread_pool_free_idle_task(thread_pool_t pool)
 		thread_pool_task_t task = list_first_entry(&pool->idle_tasks, struct thread_pool_task_, node);
 		list_del(&task->node);
 		free(task);
-		pool->idle_tasks_count--;
+		pool->info.idle_tasks_count--;
 	}
 	pthread_mutex_unlock(&pool->tasks_mtx);
 	
@@ -355,19 +352,19 @@ static inline void _thread_pool_free_idle_thread(thread_pool_t pool)
 	unsigned short idle_thread_count = 0;
 
 	pthread_mutex_lock(&pool->thread_mtx);
-	if (pool->current_thread_count <= pool->min_thread_count
-		|| pool->idle_thread_count <= 0)
+	if (pool->info.current_thread_count <= pool->info.min_thread_count
+		|| pool->info.idle_thread_count <= 0)
 		goto unlock;
 
 	
-	idle_threads = calloc(pool->max_thread_count, sizeof(thread_t));
+	idle_threads = calloc(pool->info.max_thread_count, sizeof(thread_t));
 	if (!idle_threads)
 		goto unlock;
 
 	thread = list_first_entry(&pool->threads, struct thread_, node);;
 	while (thread)
 	{
-		if (pool->current_thread_count <= pool->min_thread_count)
+		if (pool->info.current_thread_count <= pool->info.min_thread_count)
 			break;
 
 		
@@ -381,7 +378,7 @@ static inline void _thread_pool_free_idle_thread(thread_pool_t pool)
 			thread->run = false;
 			idle_threads[idle_thread_count] = thread;
 			idle_thread_count++;
-			pool->current_thread_count--;
+			pool->info.current_thread_count--;
 		}
 		thread = next_thread;
 	}
@@ -411,44 +408,10 @@ void  thread_pool_shrink(thread_pool_t pool)
 }
 
 //打印线程池状态报告
-char * thread_pool_print_report(thread_pool_t pool)
+thread_pool_info_t thread_pool_info(thread_pool_t pool)
 {
 	if (!pool)
-		return ;
+		return NULL;
 
-	char * report = (char *)calloc(256, sizeof(char));
-
-	const char * titles[] = {
-		"min thread count",
-		"max thread count",
-		"current thread count",
-		"idle thread count",
-		"waiting task count",
-		"idle_task_count"
-	};
-
-	unsigned short values[] = {
-		pool->min_thread_count,
-		pool->max_thread_count,
-		pool->current_thread_count,
-		pool->idle_thread_count,
-		pool->waiting_tasks_count,
-		pool->idle_tasks_count
-	};
-
-	int i = 0;
-	char * pos = report;
-	sprintf(pos, "%s\n", "{");
-	pos += 2;
-	for (; i < sizeof(titles) / sizeof(titles[0]); i++)
-	{
-
-		//bug
-		int len = sprintf(pos, "  \"%s\":%d,\n", titles[i], values[i]);
-		pos += len;
-	}
-
-	sprintf(pos, "%s", "}");
-	return report;
+	return &pool->info;
 }
-
