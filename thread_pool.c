@@ -383,7 +383,6 @@ static inline void _thread_pool_free_idle_thread(thread_pool_t pool)
 		thread = next_thread;
 	}
 
-	printf("waiting free idle thread count:%d\n", idle_thread_count);
 	//将备pthread_cond_wait 阻塞的所有空闲线程唤醒
 	pthread_cond_broadcast(&pool->tasks_cond);
 unlock:
