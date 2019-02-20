@@ -77,7 +77,8 @@ static inline void   _thread_pool_free_thread(thread_pool_t pool)
 
 		thread = list_entry(thread->node.next, struct thread_, node);
 	}
-
+	pthread_cond_broadcast(&pool->tasks_cond);
+	
 	while (!list_empty(&pool->threads))
 	{
 		thread = list_first_entry(&pool->threads, struct thread_, node);
@@ -192,6 +193,7 @@ static inline bool  _thread_pool_get_task(thread_pool_t pool, thread_t thread, t
 		thread->status = thread_status_idle;
 		pthread_cond_wait(&pool->tasks_cond, &pool->tasks_mtx);
 		pool->info.idle_thread_count--;
+		
 	}
 
 	if (!thread->run || list_empty(&pool->waiting_tasks))
@@ -382,7 +384,6 @@ static inline void _thread_pool_free_idle_thread(thread_pool_t pool)
 		}
 		thread = next_thread;
 	}
-
 	//将备pthread_cond_wait 阻塞的所有空闲线程唤醒
 	pthread_cond_broadcast(&pool->tasks_cond);
 unlock:
