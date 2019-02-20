@@ -194,7 +194,7 @@ static inline bool  _thread_pool_get_task(thread_pool_t pool, thread_t thread, t
 		pool->info.idle_thread_count--;
 	}
 
-	if (!thread->run)
+	if (!thread->run || list_empty(&pool->waiting_tasks))
 		goto unlock;
 
 	*task = list_first_entry(&pool->waiting_tasks, struct thread_pool_task_, node);
