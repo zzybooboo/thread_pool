@@ -24,10 +24,11 @@ typedef enum thread_status_
 
 typedef struct thread_
 {
+	struct list_head node;
 	bool			 run;
 	thread_status_t  status;
 	pthread_t		 handle;
-	struct list_head node;
+	
 }*thread_t;
 
 typedef struct thread_pool_

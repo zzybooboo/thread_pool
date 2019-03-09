@@ -1,4 +1,4 @@
-/*
+﻿/*
 author: zhangwei
 */
 
@@ -36,7 +36,7 @@ EXTERNC void               thread_pool_shrink(thread_pool_t pool);
 EXTERNC bool               thread_pool_make_task(thread_pool_t pool, void * param, task_handler_t handler);
 
 //销毁线程池
-EXTERNC void			   thread_pool_destory(thread_pool_t pool);
+EXTERNC void		       thread_pool_destory(thread_pool_t pool);
 
 //打印线程池状态报告
 EXTERNC thread_pool_info_t thread_pool_info(thread_pool_t pool);
